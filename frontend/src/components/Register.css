@@ -275,6 +275,10 @@
   transition: color 0.3s ease;
 }
 
+.proc-step.completed {
+  color: #00ff88;
+}
+
 .proc-step.active {
   color: #00d4ff;
 }
@@ -284,6 +288,40 @@
   height: 8px;
   border-radius: 50%;
   background: currentColor;
+}
+
+.processing-progress-card {
+  max-width: 420px;
+  margin: 1.5rem auto 0;
+  padding: 1rem 1.1rem;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.processing-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+  color: #d5f7ff;
+  font-size: 0.95rem;
+}
+
+.processing-progress-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.processing-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #00d4ff 0%, #4de7c4 52%, #00ff88 100%);
+  box-shadow: 0 0 24px rgba(0, 212, 255, 0.4);
+  transition: width 0.28s ease;
 }
 
 /* Success Step */

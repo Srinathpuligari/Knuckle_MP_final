@@ -1,6 +1,7 @@
 frontend/node_modules/
 node_modules/
 frontend/dist/
+prepared_dataset
 .venv/
 *.pyc
 __pycache__/
@@ -10,3 +11,16 @@ __pycache__/
 .coverage
 htmlcov/
 .DS_Store
+knuckle_preprocessing/live_registrations/
+
+# Backend runtime/generated storage
+backend/storage/registrations/
+backend/storage/registry.sqlite3
+
+# Processing outputs and reports
+knuckle_preprocessing/reports/
+knuckle_preprocessing/pointcloud_previews/
+knuckle_preprocessing/dgcnn_pointcloud_npy/
+knuckle_preprocessing/enhanced_grayscale/
+knuckle_preprocessing/extracted_pattern_binary/
+project_showcase_report/

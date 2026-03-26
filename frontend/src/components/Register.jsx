@@ -1,10 +1,36 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { User, Fingerprint, CheckCircle, AlertCircle, Loader, Phone, Mail, MapPin, Calendar } from 'lucide-react';
 import CameraCapture from './CameraCapture';
 import { API_URL } from '../config';
 import './Register.css';
+
+const MIN_PROCESSING_MS = 3000;
+const PROCESSING_STAGES = [
+  {
+    title: 'Preprocessing captures',
+    detail: 'Cropping, centering, and enhancing the clearest knuckle images.'
+  },
+  {
+    title: 'Building the biometric template',
+    detail: 'Extracting feature embeddings and combining them into one registration template.'
+  },
+  {
+    title: 'Preparing registration assets',
+    detail: 'Finalizing the processed knuckle captures and supporting registration files.'
+  },
+  {
+    title: 'Saving the registration',
+    detail: 'Writing the UID and biometric template into storage.'
+  }
+];
+
+function wait(ms) {
+  return new Promise(resolve => {
+    window.setTimeout(resolve, ms);
+  });
+}
 
 function Register() {
   const navigate = useNavigate();
@@ -19,6 +45,43 @@ function Register() {
   });
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [processingStage, setProcessingStage] = useState(0);
+  const [processingProgress, setProcessingProgress] = useState(0);
+  const progressIntervalRef = useRef(null);
+  const progressTimeoutsRef = useRef([]);
+
+  const clearProcessingTimers = () => {
+    if (progressIntervalRef.current) {
+      window.clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+    }
+    progressTimeoutsRef.current.forEach(timeoutId => window.clearTimeout(timeoutId));
+    progressTimeoutsRef.current = [];
+  };
+
+  useEffect(() => () => clearProcessingTimers(), []);
+
+  const startProcessingAnimation = () => {
+    clearProcessingTimers();
+    setProcessingStage(0);
+    setProcessingProgress(8);
+
+    progressIntervalRef.current = window.setInterval(() => {
+      setProcessingProgress(prev => {
+        if (prev >= 94) {
+          return prev;
+        }
+        return Math.min(94, prev + 1.4);
+      });
+    }, 120);
+
+    const stageTimes = [0, 800, 1650, 2400];
+    progressTimeoutsRef.current = stageTimes.map((timeout, index) => (
+      window.setTimeout(() => {
+        setProcessingStage(index);
+      }, timeout)
+    ));
+  };
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -35,6 +98,8 @@ function Register() {
   const handleImagesCapture = async (images) => {
     setStep(3);
     setError(null);
+    setResult(null);
+    startProcessingAnimation();
 
     try {
       const submitData = new FormData();
@@ -52,23 +117,34 @@ function Register() {
         submitData.append('images', blob, `image_${i}.jpg`);
       }
 
-      const res = await axios.post(`${API_URL}/register`, submitData, {
+      const requestPromise = axios.post(`${API_URL}/register`, submitData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
+      const [res] = await Promise.all([requestPromise, wait(MIN_PROCESSING_MS)]);
 
+      clearProcessingTimers();
+      setProcessingStage(PROCESSING_STAGES.length - 1);
+      setProcessingProgress(100);
+      await wait(250);
       setResult(res.data);
       setStep(4);
     } catch (err) {
+      clearProcessingTimers();
+      setProcessingProgress(0);
+      setProcessingStage(0);
       setError(err.response?.data?.message || 'Registration failed. Please try again.');
       setStep(2);
     }
   };
 
   const resetRegistration = () => {
+    clearProcessingTimers();
     setStep(1);
     setFormData({ name: '', phone: '', email: '', dob: '', address: '', gender: '' });
     setResult(null);
     setError(null);
+    setProcessingStage(0);
+    setProcessingProgress(0);
   };
 
   return (
@@ -239,24 +315,29 @@ function Register() {
           <div className="step-content processing">
             <Loader size={64} className="spinner" />
             <h2>Processing Your Registration</h2>
-            <p>Preprocessing captures, creating your knuckle template, and saving the enrollment...</p>
+            <p>{PROCESSING_STAGES[processingStage].detail}</p>
+            <div className="processing-progress-card">
+              <div className="processing-progress-meta">
+                <span>{PROCESSING_STAGES[processingStage].title}</span>
+                <span>{Math.round(processingProgress)}%</span>
+              </div>
+              <div className="processing-progress-bar">
+                <div
+                  className="processing-progress-fill"
+                  style={{ width: `${processingProgress}%` }}
+                ></div>
+              </div>
+            </div>
             <div className="processing-steps">
-              <div className="proc-step active">
-                <span className="dot"></span>
-                <span>Preprocessing images</span>
-              </div>
-              <div className="proc-step">
-                <span className="dot"></span>
-                <span>Building knuckle template</span>
-              </div>
-              <div className="proc-step">
-                <span className="dot"></span>
-                <span>Calibrating match thresholds</span>
-              </div>
-              <div className="proc-step">
-                <span className="dot"></span>
-                <span>Saving to database</span>
-              </div>
+              {PROCESSING_STAGES.map((stage, index) => (
+                <div
+                  key={stage.title}
+                  className={`proc-step ${index < processingStage ? 'completed' : ''} ${index === processingStage ? 'active' : ''}`}
+                >
+                  <span className="dot"></span>
+                  <span>{stage.title}</span>
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -279,6 +360,18 @@ function Register() {
                 <span className="label">Your Unique ID (UID)</span>
                 <span className="value uid-value">{result.uid}</span>
               </div>
+              {typeof result.quality === 'number' && (
+                <div className="result-item">
+                  <span className="label">Registration Quality</span>
+                  <span className="value">{(result.quality * 100).toFixed(1)}%</span>
+                </div>
+              )}
+              {typeof result.images_used === 'number' && (
+                <div className="result-item">
+                  <span className="label">Images Used</span>
+                  <span className="value">{result.images_used}</span>
+                </div>
+              )}
               {result.message && (
                 <p className="uid-note">{result.message}</p>
               )}

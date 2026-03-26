@@ -11,8 +11,10 @@ if __package__ in {None, ""}:
 import argparse
 import cgi
 import json
+import mimetypes
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlparse
 
 from backend.config import (
@@ -21,9 +23,15 @@ from backend.config import (
     BACKEND_PORT,
     IDENTIFY_MARGIN_THRESHOLD,
     IDENTIFY_THRESHOLD,
+    SHOWCASE_ENABLED,
+    SHOWCASE_IMAGE_SIZE,
+    SHOWCASE_POINT_COUNT,
+    SHOWCASE_REGISTRATIONS_ROOT,
+    SHOWCASE_ROTATION,
     VERIFY_MARGIN_THRESHOLD,
 )
 from backend.engine import KnuckleVerificationEngine
+from backend.showcase_preprocessing import generate_registration_showcase
 from backend.storage import RegistrationStore
 
 
@@ -53,6 +61,15 @@ class KnuckleAPIHandler(BaseHTTPRequestHandler):
 
     def _send_error(self, status_code: int, message: str) -> None:
         self._send_json(status_code, {"status": "error", "message": message})
+
+    def _send_file(self, file_path: Path) -> None:
+        body = file_path.read_bytes()
+        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _read_json(self) -> dict[str, object]:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -101,31 +118,105 @@ class KnuckleAPIHandler(BaseHTTPRequestHandler):
         supplied_code = str(payload.get("code", "")).strip()
         return bool(supplied_code and supplied_code == self.admin_code)
 
+    def _showcase_registration_root(self, uid: str) -> Path:
+        matches = sorted(SHOWCASE_REGISTRATIONS_ROOT.glob(f"{uid}_*"))
+        if not matches:
+            raise FileNotFoundError("No showcase preprocessing bundle was found for this UID.")
+        return matches[0]
+
+    def _build_showcase_manifest(self, uid: str, registration_root: Path) -> dict[str, object]:
+        pattern_dir = registration_root / "extracted_pattern_binary"
+        enhanced_dir = registration_root / "enhanced_grayscale"
+        report_dir = registration_root / "reports"
+
+        def _relative_file_paths(folder: Path) -> list[str]:
+            return [
+                f"/showcase/{uid}/{folder.name}/{path.name}"
+                for path in sorted(folder.glob("*.png"))
+            ]
+
+        preview_pattern = report_dir / "preview_original_vs_pattern.png"
+        preview_enhanced = report_dir / "preview_original_vs_enhanced.png"
+
+        return {
+            "manifest_path": f"/showcase/{uid}/manifest",
+            "preview_original_vs_pattern_url": (
+                f"/showcase/{uid}/reports/{preview_pattern.name}" if preview_pattern.exists() else ""
+            ),
+            "preview_original_vs_enhanced_url": (
+                f"/showcase/{uid}/reports/{preview_enhanced.name}" if preview_enhanced.exists() else ""
+            ),
+            "pattern_images": _relative_file_paths(pattern_dir),
+            "enhanced_images": _relative_file_paths(enhanced_dir),
+        }
+
+    def _handle_showcase_manifest(self, uid: str) -> None:
+        registration_root = self._showcase_registration_root(uid)
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "status": "success",
+                "uid": uid,
+                **self._build_showcase_manifest(uid, registration_root),
+            },
+        )
+
+    def _handle_showcase_file(self, uid: str, category: str, filename: str) -> None:
+        registration_root = self._showcase_registration_root(uid)
+        allowed_categories = {
+            "enhanced_grayscale",
+            "extracted_pattern_binary",
+            "reports",
+        }
+        if category not in allowed_categories:
+            raise FileNotFoundError("Showcase category not found.")
+
+        safe_name = Path(filename).name
+        file_path = registration_root / category / safe_name
+        if not file_path.exists() or not file_path.is_file():
+            raise FileNotFoundError("Showcase file not found.")
+        self._send_file(file_path)
+
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self.end_headers()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path == "/health":
-            self._send_json(
-                HTTPStatus.OK,
-                {
-                    "status": "ok",
-                    "message": "Knuckle backend is running.",
-                    "registered_users": self.store.count_users(),
-                    "feature_version": self.engine.feature_version,
-                },
-            )
-            return
-        if parsed.path == "/users":
-            self._send_json(
-                HTTPStatus.OK,
-                {"users": [{"uid": user["uid"], "name": user["name"]} for user in self.store.list_users()]},
-            )
-            return
+        try:
+            if parsed.path == "/health":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "status": "ok",
+                        "message": "Knuckle backend is running.",
+                        "registered_users": self.store.count_users(),
+                        "feature_version": self.engine.feature_version,
+                    },
+                )
+                return
+            if parsed.path == "/users":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"users": [{"uid": user["uid"], "name": user["name"]} for user in self.store.list_users()]},
+                )
+                return
+            if parsed.path.startswith("/showcase/"):
+                parts = [part for part in parsed.path.split("/") if part]
+                if len(parts) == 3 and parts[2] == "manifest":
+                    self._handle_showcase_manifest(parts[1])
+                    return
+                if len(parts) == 4:
+                    self._handle_showcase_file(parts[1], parts[2], parts[3])
+                    return
 
-        self._send_error(HTTPStatus.NOT_FOUND, "Endpoint not found.")
+            self._send_error(HTTPStatus.NOT_FOUND, "Endpoint not found.")
+        except ValueError as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+        except FileNotFoundError as exc:
+            self._send_error(HTTPStatus.NOT_FOUND, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"Server error: {exc}")
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -174,17 +265,39 @@ class KnuckleAPIHandler(BaseHTTPRequestHandler):
         enrollment = self.engine.create_enrollment_bundle(processed_images)
         uid = self.store.generate_uid()
         self.store.save_registration(uid, metadata, image_payloads, enrollment)
+        showcase_artifacts = None
+        showcase_warning = None
+        if SHOWCASE_ENABLED:
+            try:
+                showcase_artifacts = generate_registration_showcase(
+                    uid=uid,
+                    subject_name=metadata["name"],
+                    image_payloads=image_payloads,
+                    output_root=SHOWCASE_REGISTRATIONS_ROOT,
+                    output_size=SHOWCASE_IMAGE_SIZE,
+                    points=SHOWCASE_POINT_COUNT,
+                    rotation=SHOWCASE_ROTATION,
+                    source_rois=[capture.roi for capture in processed_images],
+                )
+            except Exception as exc:  # noqa: BLE001
+                showcase_warning = f"Showcase preprocessing could not be generated: {exc}"
+                print(f"[register:{uid}] {showcase_warning}")
 
-        self._send_json(
-            HTTPStatus.CREATED,
-            {
-                "status": "success",
-                "uid": uid,
-                "message": "Registration completed. This UID is now linked only to the registered knuckle.",
-                "quality": enrollment.registration_quality,
-                "images_used": len(processed_images),
-            },
-        )
+        payload = {
+            "status": "success",
+            "uid": uid,
+            "message": "Registration completed. This UID is now linked only to the registered knuckle.",
+            "quality": enrollment.registration_quality,
+            "images_used": len(processed_images),
+            "showcase_generated": bool(showcase_artifacts),
+        }
+        if showcase_artifacts is not None:
+            payload["showcase"] = showcase_artifacts.to_payload()
+            payload["showcase"].update(self._build_showcase_manifest(uid, showcase_artifacts.output_root))
+        if showcase_warning:
+            payload["showcase_warning"] = showcase_warning
+
+        self._send_json(HTTPStatus.CREATED, payload)
 
     def _handle_verify(self) -> None:
         form = self._read_multipart()
